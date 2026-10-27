@@ -24,7 +24,14 @@ jobs:
       - name: Build debug APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace
+          set -o pipefail
+          if ! ./gradlew assembleDebug --console=plain 2>&1 | tee build.log; then
+            # surface compiler / build errors as annotations
+            grep -E "^e: |error:|What went wrong" -A3 build.log | head -60 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit 1
+          fi
           cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/PriceCompare.apk
 
       - name: Upload APK (Actions artifact)
