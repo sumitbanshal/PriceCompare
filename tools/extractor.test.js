@@ -199,6 +199,24 @@ const tick = () => new Promise((r) => setTimeout(r, 20));
     eq("grid out of stock", lite && lite.inStock, false);
   }
 
+
+  // ---- 8. Myntra-like SSR: brand + productName, was-price ----
+  {
+    const state = { searchData: { results: { products: [
+      { productName: "Men 511 Slim Fit Jeans", brand: "Levis", price: 2199, mrp: 3999 },
+      { productName: "Women Skinny Jeans", brand: "Roadster", price: 799, wasPriceData: { value: 1999 } },
+    ] } } };
+    const w = setup('<div></div>', { beforeScripts: `window.__myx = 1; window.__INITIAL_STATE__ = ${JSON.stringify(state)};` });
+    w.__PC.configure({ platform: "myntra", query: "levis jeans" });
+    const r = JSON.parse(w.__PC.finish());
+    eq("myntra brand joined + filtered", r.items.map((i) => i.name), ["Levis Men 511 Slim Fit Jeans"]);
+    near("myntra price", r.items[0] && r.items[0].price, 2199);
+    const w2 = setup('<div></div>', { beforeScripts: `window.__INITIAL_STATE__ = ${JSON.stringify(state)};` });
+    w2.__PC.configure({ platform: "ajio", query: "roadster jeans" });
+    const r2 = JSON.parse(w2.__PC.finish());
+    near("wasPriceData as mrp", r2.items[0] && r2.items[0].mrp, 1999);
+  }
+
   console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
   process.exit(fails ? 1 : 0);
 })();

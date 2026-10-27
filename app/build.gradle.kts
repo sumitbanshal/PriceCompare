@@ -12,11 +12,25 @@ android {
         applicationId = "com.pricecompare.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+    }
+
+    // Fixed debug key (committed on purpose) so new builds install over the old app
+    // without uninstalling, keeping your sign-ins.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("pricecompare-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

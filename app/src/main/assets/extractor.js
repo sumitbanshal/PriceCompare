@@ -159,7 +159,8 @@
   // ---------- JSON walker ----------
   var NAME_KEYS = /^(name|product_?name|display_?name|productname|title|item_?name|product_?title)$/i;
   var SP_KEYS = /^(price|sp|selling_?price|offer_?price|final_?price|discounted_?price|discounted_?selling_?price|sale_?price|store_?price|special_?price|deal_?price|our_?price|effective_?price|price_?to_?pay)$/i;
-  var MRP_KEYS = /^(mrp|max_?retail_?price|list_?price|original_?price|marked_?price|strike_?price|strikethrough_?price|base_?price|actual_?price)$/i;
+  var MRP_KEYS = /^(mrp|max_?retail_?price|list_?price|original_?price|marked_?price|strike_?price|strikethrough_?price|base_?price|actual_?price|was_?price(_?data)?|strike_?off_?price|regular_?price|compare_?at_?price)$/i;
+  var BRAND_KEYS = /^(brand|brand_?name|brandname)$/i;
   var QTY_KEYS = /^(unit|quantity|weight|size|variant|uom|unit_?of_?measure)$|pack_?size|net_?(quantity|qty|weight)|pack_?desc|unit_?(quantity|string|text|label)|display_?unit|weight_?in|quantity_?(text|label|desc)|sku_?quantity/i;
   var IMG_KEYS = /^(image|image_?url|img|thumbnail|images|image_?urls|media|primary_?image)$/i;
   var STOCK_KEYS = /^(in_?stock|is_?in_?stock|available|is_?available|availability|out_?of_?stock|is_?sold_?out|sold_?out|unavailable)$/i;
@@ -195,11 +196,12 @@
   }
 
   function examine(o, source, scale) {
-    var name = null, sps = [], mrps = [], qty = null, img = null, stock = null;
+    var name = null, sps = [], mrps = [], qty = null, img = null, stock = null, brand = null;
     var props = flatProps(o);
     for (var pi = 0; pi < props.length; pi++) {
       var k = props[pi][0], v = props[pi][1];
       if (!name && NAME_KEYS.test(k) && typeof v === "string") name = v;
+      else if (!brand && BRAND_KEYS.test(k) && typeof v === "string" && v.length < 40) brand = v;
       else if (SP_KEYS.test(k)) { var a = num(v); if (a != null) sps.push(a); }
       else if (MRP_KEYS.test(k)) { var b = num(v); if (b != null) mrps.push(b); }
       else if (!qty && QTY_KEYS.test(k) && (typeof v === "string" || typeof v === "number")) qty = String(v);
@@ -212,6 +214,7 @@
     if (!name || (!sps.length && !mrps.length)) return;
     // reject obvious non-products (categories, banners, filters)
     if (/^(all|filters?|sort|offers?|categories)$/i.test(name.trim())) return;
+    if (brand && name.toLowerCase().indexOf(brand.toLowerCase()) === -1) name = brand + " " + name;
     var sp = sps.length ? Math.min.apply(null, sps.filter(function (x) { return x > 0; }).concat([Infinity])) : null;
     if (sp === Infinity) sp = null;
     var mrp = mrps.length ? Math.max.apply(null, mrps) : null;

@@ -1,62 +1,139 @@
 package com.pricecompare.app
 
-import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Context
-import android.content.pm.PackageManager
-import android.location.Geocoder
-import android.location.LocationManager
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
-import java.util.Locale
 
 class SearchController(
+    private val context: Context,
     private val engine: ScrapeEngine,
-    private val prefs: Prefs,
+    private val sync: LocationSync,
+    val prefs: Prefs,
     private val scope: CoroutineScope,
 ) {
-    /** platformId -> latest result */
+    /** platformId -> latest result, for the current category */
     val results = mutableStateMapOf<String, PlatformResult>()
     var running by mutableStateOf(false)
         private set
     var query by mutableStateOf(prefs.lastQuery)
         private set
+    var category by mutableStateOf(prefs.category)
+        private set
+
+    // ---- location ----
+    var location by mutableStateOf(DeviceLocation.fromJson(prefs.deviceLocationJson))
+        private set
+    var locating by mutableStateOf(false)
+        private set
+    var locationError by mutableStateOf<String?>(null)
+        private set
+
+    private data class Snapshot(val query: String, val fingerprint: String?, val results: Map<String, PlatformResult>)
+    private val cache = mutableMapOf<Category, Snapshot>()
 
     private var job: Job? = null
     private val parallel = Semaphore(3) // 3 WebViews at a time keeps memory reasonable
 
-    fun search(q: String, platforms: List<Platform>) {
+    fun hasLocationPermission() = LocationRepo.hasPermission(context)
+
+    /** Re-read the phone's location (skipped when the user pinned a pincode, unless [force]). */
+    fun refreshLocation(force: Boolean = false) {
+        if (locating) return
+        if (location?.manual == true && !force) return
+        if (!LocationRepo.hasPermission(context)) {
+            locationError = "Location permission is off"
+            return
+        }
+        locating = true
+        locationError = null
+        scope.launch {
+            try {
+                val loc = LocationRepo.fromDevice(context)
+                if (loc == null) locationError = "Couldn't get a location fix. Turn on location, or enter a pincode."
+                else setLocation(loc)
+            } finally {
+                locating = false
+            }
+        }
+    }
+
+    fun usePincode(pin: String, onDone: (Boolean) -> Unit) {
+        locating = true
+        scope.launch {
+            try {
+                val loc = LocationRepo.fromPincode(context, pin)
+                if (loc != null) setLocation(loc)
+                onDone(loc != null)
+            } finally {
+                locating = false
+            }
+        }
+    }
+
+    private fun setLocation(loc: DeviceLocation) {
+        val moved = location?.fingerprint != loc.fingerprint
+        location = loc
+        locationError = null
+        prefs.deviceLocationJson = loc.toJson().toString()
+        if (moved) cache.clear() // prices/availability differ by area
+    }
+
+    /** Script + cookies so a visible page opens at the same location. */
+    fun prepareForBrowser(p: Platform): String {
+        sync.prepare(p, location)
+        return sync.pageScript(location)
+    }
+
+    // ---- searching ----
+
+    fun enabledPlatforms(c: Category = category) = Platforms.forCategory(c).filter { prefs.isEnabled(c, it) }
+
+    fun selectCategory(c: Category) {
+        if (c == category) return
+        if (!running) cache[category] = Snapshot(query, location?.fingerprint, results.toMap())
+        job?.cancel()
+        running = false
+        category = c
+        prefs.category = c
+        results.clear()
+        val snap = cache[c]
+        if (snap != null && snap.query == query && snap.fingerprint == location?.fingerprint) results.putAll(snap.results)
+        else if (query.isNotBlank()) search(query)
+    }
+
+    fun search(q: String) {
         val trimmed = q.trim()
+        val platforms = enabledPlatforms()
         if (trimmed.isEmpty() || platforms.isEmpty()) return
         job?.cancel()
+        if (trimmed != query) cache.clear()
         query = trimmed
         prefs.lastQuery = trimmed
         results.clear()
         platforms.forEach { results[it.id] = PlatformResult(it, Status.WAITING) }
         running = true
+        val cat = category
         job = scope.launch {
             try {
-                platforms.map { p -> launch { runOne(p, trimmed) } }.joinAll()
+                platforms.map { p -> launch { runOne(p, trimmed, cat) } }.joinAll()
             } finally {
-                running = false
+                if (category == cat) running = false
             }
         }
     }
 
     fun retry(p: Platform) {
         val q = query.ifBlank { return }
-        scope.launch { runOne(p, q) }
+        val cat = category
+        scope.launch { runOne(p, q, cat) }
     }
 
     fun cancel() {
@@ -66,10 +143,14 @@ class SearchController(
             .forEach { results[it.key] = it.value.copy(status = Status.ERROR, message = "Cancelled") }
     }
 
-    private suspend fun runOne(p: Platform, q: String) {
+    private suspend fun runOne(p: Platform, q: String, cat: Category) {
         parallel.withPermit {
+            if (category != cat) return
             results[p.id] = PlatformResult(p, Status.LOADING)
-            results[p.id] = engine.scrape(p, prefs.searchUrl(p, q), q)
+            val loc = location
+            sync.prepare(p, loc)
+            val r = engine.scrape(p, prefs.searchUrl(p, q, cat), q, sync.pageScript(loc))
+            if (category == cat) results[p.id] = r
         }
     }
 }
@@ -99,29 +180,4 @@ fun bestPerPlatform(results: Collection<PlatformResult>, byUnitPrice: Boolean): 
         rankItems(r.items.filter { it.relevance >= top - 0.01 }, byUnitPrice, dominant).firstOrNull()
     }
     return rankItems(best, byUnitPrice, dominant)
-}
-
-// ---------- location ----------
-
-object LocationHelper {
-    @SuppressLint("MissingPermission") // checked just below
-    /** Pincode + locality of the phone's last known position, so you can check each site matches. */
-    suspend fun currentArea(context: Context): String? = withContext(Dispatchers.IO) {
-        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
-        if (!granted) return@withContext null
-        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        val loc = try {
-            lm.getProviders(true).mapNotNull { lm.getLastKnownLocation(it) }.maxByOrNull { it.time }
-        } catch (e: SecurityException) {
-            null
-        } ?: return@withContext null
-        try {
-            @Suppress("DEPRECATION")
-            val a = Geocoder(context, Locale("en", "IN")).getFromLocation(loc.latitude, loc.longitude, 1)?.firstOrNull()
-            listOfNotNull(a?.subLocality ?: a?.locality, a?.postalCode).joinToString(" · ").ifBlank { null }
-        } catch (e: Exception) {
-            String.format(Locale.US, "%.4f, %.4f", loc.latitude, loc.longitude)
-        }
-    }
 }

@@ -1,14 +1,14 @@
 # PriceCompare (Android)
 
-Search one product and compare price, MRP, discount and **₹ per kg / L / piece** across
-Blinkit, Zepto, Swiggy Instamart, Flipkart Minutes, Flipkart, Amazon Fresh, Amazon and DMart Ready,
-for your current delivery location.
+Search one product and compare price, MRP, discount and **₹ per kg / L / piece** across up to
+14 shopping apps in four categories (Grocery, Apparel, Beauty, Electronics), all set to your phone's current location.
 
 ## Install on your phone (no computer needed)
 
 Every push to `main` builds the app on GitHub. On your phone, open this repository's
 **Releases → Latest build** and download `PriceCompare.apk`, then open it and allow
 "Install unknown apps" for your browser when asked.
+From version 1.1 on, new builds install over the old one (same signing key), keeping your sign-ins.
 
 ## Build it yourself
 
@@ -19,36 +19,37 @@ Every push to `main` builds the app on GitHub. On your phone, open this reposito
 
 Minimum Android 8.0.
 
+## Categories
+
+| Category | Apps | Ranked by |
+|---|---|---|
+| Grocery | Blinkit, Zepto, Instamart, Flipkart Minutes, DMart Ready, Amazon Fresh, Amazon, Flipkart | ₹ per kg / L / pc |
+| Apparel | Myntra, AJIO, Amazon (fashion), Flipkart | price |
+| Beauty | Nykaa, Purplle, Blinkit, Zepto, Instamart, Myntra, Amazon (beauty), Flipkart | ₹ per ml-g / pc |
+| Electronics | Croma, Reliance Digital, Amazon (electronics), Flipkart, Flipkart Minutes, Blinkit, Zepto, Instamart | price |
+
+Turn an app on/off per category in **Setup**.
+
+## Location (automatic)
+
+The app takes the phone's location (GPS / network) and turns it into a pincode + area. The bar at the top shows it;
+**↻** re-reads it, **✎** lets you type a pincode instead. That one location is applied to every app — on hidden
+searches *and* when you tap an app or product to open it:
+
+- every site's "detect my location" receives the phone's coordinates instantly (`location.js` overrides geolocation);
+- location popups are filled in automatically: the "use current location" button is pressed, or the pincode / area
+  is typed and confirmed (only right after its own action, max 10 actions per page);
+- Amazon / Amazon Fresh: the delivery pincode is set through Amazon's own pincode request;
+- Blinkit and Swiggy: location cookies are pre-set;
+- when you move to a new pincode, Blinkit, Zepto and DMart forget their old location so they take the new one.
+
+Still needed once: **sign in to Flipkart** (Minutes needs a saved address near you) and Amazon if Fresh asks.
+
 ## First-time setup (in the app)
 
 1. Allow location when asked.
-2. Tap the **gear icon → Setup**. For each app tap **Open & set location**:
-   - set your delivery address (the sites' "detect my location" buttons use your phone's GPS);
-   - sign in to **Amazon** and **Flipkart** (Minutes and Fresh need it); signing in to Swiggy helps too.
-3. Back on the main screen, search, e.g. `amul butter 500 g`.
-
-Sign-ins and locations persist (the app keeps its own browser cookies). The top bar shows your phone's area and
-pincode so you can check that every site is set to the same place.
-
-## How it works
-
-```
-Search ─► for each enabled app (3 at a time)
-            hidden WebView loads the site's search page (your session + location)
-            extractor.js, injected before the page's own scripts:
-              1. api : wraps fetch/XHR and reads the JSON the site fetches for itself
-              2. ssr : reads state embedded in the HTML (__NEXT_DATA__, __INITIAL_STATE__, ld+json)
-              3. dom : falls back to reading visible product cards (₹ prices, name, pack size)
-            merges, fixes paise vs rupees, filters to items matching your words,
-            parses pack size ("2 x 500 ml", "Pack of 3, 100 g") and computes ₹/kg, ₹/L or ₹/pc
-        ◄─ results ranked by unit price (or by price)
-```
-
-- **Best match on each app** – the most relevant in-stock item per app, ranked cheapest per unit.
-- **All matches** – everything found, same ranking.
-- Status chips show each app's state (*Set location*, *Sign in*, *Not in your area*, *No match*).
-  Tap a chip to open that app's page, fix it, then tap **Retry**.
-- Tap any product to open it inside the app (with your session) and add it to the cart.
+2. Optional: **Setup → Open / sign in** for Flipkart and Amazon.
+3. Pick a category, search.
 
 ## When an app stops working
 
@@ -61,16 +62,18 @@ Sites change. In order of effort:
 3. **Nothing found but the page shows products** → the generic parsers missed the site's format; add
    key names to `NAME_KEYS` / `SP_KEYS` / `MRP_KEYS` / `QTY_KEYS` in `app/src/main/assets/extractor.js`.
 
-Extractor tests (Node 18+): `cd tools && npm i jsdom && node extractor.test.js ../app/src/main/assets/extractor.js`
+Tests (Node 18+): `cd tools && npm i jsdom && node extractor.test.js ../app/src/main/assets/extractor.js && node location.test.js ../app/src/main/assets/location.js`
 
 ## Files
 
 | File | What it does |
 |---|---|
+| `assets/location.js` | Phone location into each site: geolocation, popup filler, Amazon pincode |
+| `Location.kt` | GPS fix, pincode lookup, location cookies, reset after moving |
 | `assets/extractor.js` | API capture, SSR + DOM extraction, pack-size and unit-price parsing |
 | `ScrapeEngine.kt` | Off-screen WebViews, script injection, waits for results to settle |
 | `SearchController.kt` | Runs searches in parallel, ranking, phone location lookup |
-| `Platforms.kt` | The 8 apps, their URLs, saved settings |
+| `Platforms.kt` | Categories, the 14 apps, their URLs, saved settings |
 | `Screens.kt` | Search, Setup and in-app browser screens |
 
 ## Notes

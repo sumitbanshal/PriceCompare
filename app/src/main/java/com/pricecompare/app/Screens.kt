@@ -11,6 +11,7 @@ import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -33,6 +35,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -50,7 +54,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -68,6 +71,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -78,17 +82,21 @@ import androidx.compose.ui.viewinterop.AndroidView
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SearchScreen(
-    prefs: Prefs,
     controller: SearchController,
-    area: String?,
+    requestLocationPermission: () -> Unit,
     onOpenSetup: () -> Unit,
     onOpen: (Platform, String) -> Unit,
 ) {
+    val prefs = controller.prefs
+    val category = controller.category
     var text by rememberSaveable { mutableStateOf(controller.query) }
-    var byUnit by rememberSaveable { mutableStateOf(true) }
+    // per category default: unit price for groceries/beauty, plain price for apparel/electronics
+    var byUnitOverride by remember(category) { mutableStateOf<Boolean?>(null) }
+    val byUnit = byUnitOverride ?: category.sortByUnit
     val keyboard = LocalSoftwareKeyboardController.current
 
-    val results = controller.results.values.sortedBy { Platforms.all.indexOf(it.platform) }
+    val order = Platforms.forCategory(category)
+    val results = controller.results.values.sortedBy { order.indexOf(it.platform) }
     val ok = results.filter { it.status == Status.OK }
     val best = bestPerPlatform(ok, byUnit)
     val all = rankItems(ok.flatMap { it.items }, byUnit)
@@ -96,34 +104,42 @@ fun SearchScreen(
 
     fun go() {
         keyboard?.hide()
-        controller.search(text, Platforms.all.filter { prefs.isEnabled(it) })
+        controller.search(text)
     }
+    fun searchUrl(p: Platform) = prefs.searchUrl(p, controller.query, category)
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Column {
-                        Text("PriceCompare", fontWeight = FontWeight.SemiBold)
-                        if (area != null) Text("Phone location: $area", style = MaterialTheme.typography.labelSmall)
-                    }
-                },
+                title = { Text("PriceCompare", fontWeight = FontWeight.SemiBold) },
                 actions = { IconButton(onClick = onOpenSetup) { Icon(Icons.Default.Settings, "Setup") } },
             )
         },
     ) { pad ->
         LazyColumn(
             modifier = Modifier.padding(pad).fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            item { LocationBar(controller, requestLocationPermission) }
+            item {
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Category.entries.forEach { c ->
+                        FilterChip(
+                            selected = c == category,
+                            onClick = { controller.selectCategory(c) },
+                            label = { Text(c.label) },
+                        )
+                    }
+                }
+            }
             item {
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    placeholder = { Text("e.g. amul butter 500 g") },
+                    placeholder = { Text(category.example) },
                     trailingIcon = {
                         if (controller.running) {
                             IconButton(onClick = { controller.cancel() }) {
@@ -139,8 +155,8 @@ fun SearchScreen(
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(selected = byUnit, onClick = { byUnit = true }, label = { Text("Cheapest per kg / L / pc") })
-                    FilterChip(selected = !byUnit, onClick = { byUnit = false }, label = { Text("Lowest price") })
+                    FilterChip(selected = byUnit, onClick = { byUnitOverride = true }, label = { Text("Cheapest per kg / L / pc") })
+                    FilterChip(selected = !byUnit, onClick = { byUnitOverride = false }, label = { Text("Lowest price") })
                 }
             }
 
@@ -148,13 +164,12 @@ fun SearchScreen(
                 item {
                     Card(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Compare one product across 8 apps", style = MaterialTheme.typography.titleMedium)
+                            Text("${category.label}: compare across ${order.size} apps", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "First time? Open Setup (gear icon) and set the same delivery location on each app, " +
-                                    "and sign in to Amazon and Flipkart. Then search here.",
+                                order.joinToString(", ") { it.name } + ". Your phone's location is applied to every app automatically. " +
+                                    "For Flipkart Minutes and Amazon Fresh, sign in once from Setup.",
                                 style = MaterialTheme.typography.bodyMedium,
                             )
-                            TextButton(onClick = onOpenSetup) { Text("Open Setup") }
                         }
                     }
                 }
@@ -162,10 +177,7 @@ fun SearchScreen(
                 item {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         results.forEach { r ->
-                            StatusChip(r) {
-                                // let the user fix location / login on the page itself, then retry
-                                onOpen(r.platform, prefs.searchUrl(r.platform, controller.query))
-                            }
+                            StatusChip(r) { onOpen(r.platform, searchUrl(r.platform)) }
                         }
                     }
                 }
@@ -174,7 +186,7 @@ fun SearchScreen(
                         TextButton(onClick = { failed.forEach { controller.retry(it.platform) } }) {
                             Icon(Icons.Default.Refresh, null)
                             Spacer(Modifier.width(6.dp))
-                            Text("Retry ${failed.size} app${if (failed.size > 1) "s" else ""} (tap a chip first to fix location or login)")
+                            Text("Retry ${failed.size} app${if (failed.size > 1) "s" else ""} (tap a chip to see the page)")
                         }
                     }
                 }
@@ -183,20 +195,102 @@ fun SearchScreen(
             if (best.isNotEmpty()) {
                 item { SectionTitle("Best match on each app") }
                 items(best, key = { "best-" + it.platformId }) { item ->
-                    ItemCard(item, highlight = item === best.first()) {
-                        onOpen(Platforms.byId(item.platformId), item.url ?: prefs.searchUrl(Platforms.byId(item.platformId), controller.query))
+                    val p = Platforms.byId(item.platformId)
+                    ItemCard(item, highlight = item === best.first(), showUnit = byUnit || category.sortByUnit) {
+                        onOpen(p, item.url ?: searchUrl(p))
                     }
                 }
             }
             if (all.size > best.size) {
                 item { SectionTitle("All matches (${all.size})") }
                 items(all, key = { it.platformId + "|" + it.name + "|" + it.quantity + "|" + it.price }) { item ->
-                    ItemCard(item, highlight = false) {
-                        onOpen(Platforms.byId(item.platformId), item.url ?: prefs.searchUrl(Platforms.byId(item.platformId), controller.query))
+                    val p = Platforms.byId(item.platformId)
+                    ItemCard(item, highlight = false, showUnit = byUnit || category.sortByUnit) {
+                        onOpen(p, item.url ?: searchUrl(p))
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun LocationBar(controller: SearchController, requestLocationPermission: () -> Unit) {
+    val loc = controller.location
+    var editing by remember { mutableStateOf(false) }
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Row(Modifier.padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.LocationOn, null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    when {
+                        loc != null -> "Delivering to ${loc.label}"
+                        controller.locating -> "Finding your location…"
+                        else -> "Location not set"
+                    },
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    when {
+                        controller.locationError != null && loc == null -> controller.locationError!!
+                        loc?.manual == true -> "Pincode you entered · applied to all apps"
+                        loc != null -> "From your phone · applied to all apps"
+                        else -> "Needed so every app shows prices for the same place"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (controller.locating) {
+                CircularProgressIndicator(Modifier.padding(8.dp).size(20.dp), strokeWidth = 2.dp)
+            } else {
+                IconButton(onClick = {
+                    if (controller.hasLocationPermission()) controller.refreshLocation(force = true)
+                    else requestLocationPermission()
+                }) { Icon(Icons.Default.Refresh, "Use phone location") }
+            }
+            IconButton(onClick = { editing = true }) { Icon(Icons.Default.Edit, "Enter pincode") }
+        }
+    }
+
+    if (editing) {
+        var pin by remember { mutableStateOf(loc?.pincode ?: "") }
+        var error by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { editing = false },
+            title = { Text("Delivery location") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter a pincode to compare prices there instead of your phone's location.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = pin,
+                        onValueChange = { v -> pin = v.filter { it.isDigit() }.take(6); error = null },
+                        label = { Text("Pincode") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        isError = error != null,
+                        supportingText = { error?.let { Text(it) } },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = pin.length == 6 && !controller.locating, onClick = {
+                    controller.usePincode(pin) { okay -> if (okay) editing = false else error = "Couldn't find that pincode" }
+                }) { Text("Use pincode") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    editing = false
+                    if (controller.hasLocationPermission()) controller.refreshLocation(force = true)
+                    else requestLocationPermission()
+                }) { Text("Use phone location") }
+            },
+        )
     }
 }
 
@@ -228,7 +322,7 @@ private fun StatusChip(r: PlatformResult, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ItemCard(item: Item, highlight: Boolean, onClick: () -> Unit) {
+private fun ItemCard(item: Item, highlight: Boolean, showUnit: Boolean, onClick: () -> Unit) {
     val p = Platforms.byId(item.platformId)
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
@@ -264,7 +358,7 @@ private fun ItemCard(item: Item, highlight: Boolean, onClick: () -> Unit) {
                         }
                     }
                 }
-                item.unitPriceLabel()?.let {
+                if (showUnit) item.unitPriceLabel()?.let {
                     Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
                 }
             }
@@ -274,10 +368,11 @@ private fun ItemCard(item: Item, highlight: Boolean, onClick: () -> Unit) {
 
 // ======================= Setup =======================
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun SetupScreen(prefs: Prefs, area: String?, onBack: () -> Unit, onOpen: (Platform) -> Unit) {
+fun SetupScreen(controller: SearchController, onBack: () -> Unit, onOpen: (Platform) -> Unit) {
     BackHandler(onBack = onBack)
+    val prefs = controller.prefs
     var version by remember { mutableIntStateOf(0) }
     var editing by remember { mutableStateOf<Platform?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
@@ -297,26 +392,31 @@ fun SetupScreen(prefs: Prefs, area: String?, onBack: () -> Unit, onOpen: (Platfo
         ) {
             item {
                 Text(
-                    "Open each app once and set the same delivery location" +
-                        (area?.let { " (your phone is at $it)" } ?: "") +
-                        ". Location buttons on the sites can use your phone's GPS. Sign-ins and locations are kept between searches.",
+                    "Location is applied to every app automatically" +
+                        (controller.location?.let { " (now: ${it.label})" } ?: "") +
+                        ". Sign in to Flipkart and Amazon once here for Flipkart Minutes and Amazon Fresh. " +
+                        "Tap a category under an app to include or skip it there.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
             items(Platforms.all, key = { it.id }) { p ->
-                val enabled = remember(version) { prefs.isEnabled(p) }
-                val custom = remember(version) { prefs.searchTemplate(p) != p.defaultSearchUrl }
+                val custom = remember(version) { prefs.customTemplate(p) != null }
                 Card(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Dot(p.color)
                             Spacer(Modifier.width(8.dp))
                             Text(p.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                            Switch(checked = enabled, onCheckedChange = { prefs.setEnabled(p, it); version++ })
                         }
                         Text(p.setupHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            p.categories.forEach { c ->
+                                val on = remember(version) { prefs.isEnabled(c, p) }
+                                FilterChip(selected = on, onClick = { prefs.setEnabled(c, p, !on); version++ }, label = { Text(c.label) })
+                            }
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedButton(onClick = { onOpen(p) }) { Text("Open & set location") }
+                            OutlinedButton(onClick = { onOpen(p) }) { Text("Open / sign in") }
                             TextButton(onClick = { editing = p }) { Text(if (custom) "Search URL (custom)" else "Search URL") }
                         }
                     }
@@ -324,7 +424,7 @@ fun SetupScreen(prefs: Prefs, area: String?, onBack: () -> Unit, onOpen: (Platfo
             }
             item {
                 TextButton(onClick = { confirmClear = true }) {
-                    Text("Sign out everywhere & clear saved locations", color = MaterialTheme.colorScheme.error)
+                    Text("Sign out everywhere & clear site data", color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -338,7 +438,7 @@ fun SetupScreen(prefs: Prefs, area: String?, onBack: () -> Unit, onOpen: (Platfo
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Put {q} where the search words go. If results stop working, search on the site, copy the address of the results page, and replace your words with {q}.",
+                        "Put {q} where the search words go ({slug} for words-joined-by-dashes). If results stop working, search on the site, copy the address of the results page, and replace your words with {q}.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     OutlinedTextField(value = value, onValueChange = { value = it }, modifier = Modifier.fillMaxWidth())
@@ -346,7 +446,7 @@ fun SetupScreen(prefs: Prefs, area: String?, onBack: () -> Unit, onOpen: (Platfo
             },
             confirmButton = {
                 TextButton(
-                    enabled = value.contains("{q}") && value.startsWith("http"),
+                    enabled = (value.contains("{q}") || value.contains("{slug}")) && value.startsWith("http"),
                     onClick = { prefs.setSearchTemplate(p, value); editing = null; version++ },
                 ) { Text("Save") }
             },
@@ -363,7 +463,7 @@ fun SetupScreen(prefs: Prefs, area: String?, onBack: () -> Unit, onOpen: (Platfo
         AlertDialog(
             onDismissRequest = { confirmClear = false },
             title = { Text("Clear everything?") },
-            text = { Text("This signs you out of all 8 apps inside PriceCompare and forgets their delivery locations.") },
+            text = { Text("This signs you out of all apps inside PriceCompare and clears their saved data. Your location will be applied again on the next search.") },
             confirmButton = {
                 TextButton(onClick = {
                     CookieManager.getInstance().removeAllCookies(null)
@@ -377,11 +477,11 @@ fun SetupScreen(prefs: Prefs, area: String?, onBack: () -> Unit, onOpen: (Platfo
     }
 }
 
-// ======================= Browser (visible, for setup and opening products) =======================
+// ======================= Browser (visible, opens at your location) =======================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BrowserScreen(platform: Platform, url: String, onClose: () -> Unit) {
+fun BrowserScreen(platform: Platform, url: String, pageScript: String, onClose: () -> Unit) {
     var webView by remember { mutableStateOf<WebView?>(null) }
     var title by remember { mutableStateOf(platform.name) }
     var progress by remember { mutableIntStateOf(0) }
@@ -413,6 +513,8 @@ fun BrowserScreen(platform: Platform, url: String, onClose: () -> Unit) {
                 factory = { ctx ->
                     WebView(ctx).apply {
                         configureWebView(this)
+                        // phone location for "detect location", pincode popups and Amazon's pincode
+                        val injected = installPageScript(this, pageScript)
                         webChromeClient = object : WebChromeClient() {
                             override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback?) {
                                 callback?.invoke(origin, true, true)
@@ -428,6 +530,7 @@ fun BrowserScreen(platform: Platform, url: String, onClose: () -> Unit) {
                             }
                             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                                 title = platform.name
+                                if (!injected && pageScript.isNotBlank()) view.evaluateJavascript(pageScript, null)
                             }
                             override fun onPageFinished(view: WebView, url: String?) {
                                 title = view.title?.takeIf { it.isNotBlank() } ?: platform.name

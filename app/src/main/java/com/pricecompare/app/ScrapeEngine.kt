@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 import kotlin.coroutines.resume
@@ -45,6 +46,16 @@ fun configureWebView(wv: WebView) {
     }
 }
 
+/** Runs [script] at the start of every page this WebView loads (falls back to onPageStarted). */
+fun installPageScript(wv: WebView, script: String): Boolean {
+    if (script.isBlank()) return true
+    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+        WebViewCompat.addDocumentStartJavaScript(wv, script, setOf("*"))
+        return true
+    }
+    return false
+}
+
 /**
  * Loads a platform's search page in an off-screen WebView, lets the page call its own APIs
  * (captured by extractor.js), then asks the extractor for the merged result.
@@ -61,11 +72,12 @@ class ScrapeEngine(private val context: Context, private val host: FrameLayout) 
         var docStartInjected = false
     }
 
-    suspend fun scrape(p: Platform, url: String, query: String, timeoutMs: Long = 22_000): PlatformResult =
+    /** [locationScript]: from [LocationSync.pageScript]; runs before the extractor on every page. */
+    suspend fun scrape(p: Platform, url: String, query: String, locationScript: String, timeoutMs: Long = 24_000): PlatformResult =
         withContext(Dispatchers.Main) {
             val start = SystemClock.elapsedRealtime()
             val cfg = JSONObject().put("platform", p.id).put("query", query).put("priceScale", p.priceScale)
-            val bootstrap = "window.__PC_CFG=$cfg;\n$extractorJs"
+            val bootstrap = "$locationScript\nwindow.__PC_CFG=$cfg;\n$extractorJs"
             val state = PageState()
             val wv = createWebView(bootstrap, state)
             try {
@@ -90,14 +102,41 @@ class ScrapeEngine(private val context: Context, private val host: FrameLayout) 
         var last = -2
         var stable = 0
         var scrolls = 0
+        var reloaded = false
+        var deadline = timeoutMs
         while (true) {
             delay(1200)
             val elapsed = SystemClock.elapsedRealtime() - start
-            var count = eval(wv, "window.__PC ? window.__PC.snapshot() : -1")?.toIntOrNull() ?: -1
+            val probe = eval(
+                wv,
+                "JSON.stringify([window.__PC ? window.__PC.snapshot() : -1," +
+                    " window.__PCLOC ? window.__PCLOC.acted : 0," +
+                    " window.__PCLOC && window.__PCLOC.lastActionAt ? Date.now() - window.__PCLOC.lastActionAt : 1e9])",
+            )
+            val arr = runCatching { JSONArray(JSONTokener(probe ?: "").nextValue() as String) }.getOrNull()
+            var count = arr?.optInt(0, -1) ?: -1
+            val locActions = arr?.optInt(1, 0) ?: 0
+            val sinceLocAction = arr?.optLong(2, 1_000_000_000L) ?: 1_000_000_000L
             if (count == -1 && state.finished) {
                 // document-start injection unavailable or page replaced the window: inject late
                 eval(wv, bootstrap + ";0")
                 count = 0
+            }
+            // the site is busy taking our location: give it time
+            if (locActions > 0 && sinceLocAction < 4_000) {
+                deadline = maxOf(deadline, elapsed + 8_000).coerceAtMost(timeoutMs + 16_000)
+                if (elapsed < deadline) {
+                    stable = 0
+                    continue
+                }
+            }
+            // location got set but the search results never came: run the search again once
+            if (!reloaded && locActions > 0 && count <= 0 && state.finished && sinceLocAction > 3_000) {
+                reloaded = true
+                wv.loadUrl(url)
+                deadline = maxOf(deadline, elapsed + 14_000)
+                last = -2; stable = 0; scrolls = 0
+                continue
             }
             // nudge lazy-loaded grids
             if (state.finished && scrolls < 2 && elapsed > 2500L * (scrolls + 1)) {
@@ -107,9 +146,10 @@ class ScrapeEngine(private val context: Context, private val host: FrameLayout) 
             stable = if (count == last) stable + 1 else 0
             last = count
             val done = when {
-                elapsed >= timeoutMs -> true
+                elapsed >= deadline -> true
                 count > 0 && stable >= 2 && elapsed >= 4_000 -> true
-                state.finished && count <= 0 && stable >= 4 && elapsed >= 7_000 -> true
+                state.finished && count <= 0 && stable >= 4 && elapsed >= 7_000 && locActions == 0 -> true
+                state.finished && count <= 0 && stable >= 5 && reloaded -> true
                 else -> false
             }
             if (done) break
@@ -127,10 +167,7 @@ class ScrapeEngine(private val context: Context, private val host: FrameLayout) 
     private fun createWebView(bootstrap: String, state: PageState): WebView {
         val wv = WebView(context)
         configureWebView(wv)
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            WebViewCompat.addDocumentStartJavaScript(wv, bootstrap, setOf("*"))
-            state.docStartInjected = true
-        }
+        state.docStartInjected = installPageScript(wv, bootstrap)
         wv.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 state.finished = false
