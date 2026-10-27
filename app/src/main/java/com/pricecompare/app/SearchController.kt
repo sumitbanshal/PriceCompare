@@ -58,7 +58,7 @@ class SearchController(
             try {
                 val loc = LocationRepo.fromDevice(context)
                 if (loc == null) locationError = "Couldn't get a location fix. Turn on location, or enter a pincode."
-                else setLocation(loc)
+                else applyLocation(loc)
             } finally {
                 locating = false
             }
@@ -70,7 +70,7 @@ class SearchController(
         scope.launch {
             try {
                 val loc = LocationRepo.fromPincode(context, pin)
-                if (loc != null) setLocation(loc)
+                if (loc != null) applyLocation(loc)
                 onDone(loc != null)
             } finally {
                 locating = false
@@ -78,7 +78,7 @@ class SearchController(
         }
     }
 
-    private fun setLocation(loc: DeviceLocation) {
+    private fun applyLocation(loc: DeviceLocation) {
         val moved = location?.fingerprint != loc.fingerprint
         location = loc
         locationError = null
